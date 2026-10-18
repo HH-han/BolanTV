@@ -1,0 +1,134 @@
+name: Build Android App APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: '服务端 Base URL（仅作为应用内默认地址，安装后可在应用内修改），例如 http://192.168.1.10:3000'
+        required: true
+        default: 'http://10.234.151.149:3000'
+        type: string
+      app_name:
+        description: '应用名称'
+        required: true
+        default: 'BolanTV'
+        type: string
+      version_name:
+        description: '版本名'
+        required: false
+        default: '1.0.0'
+        type: string
+      version_code:
+        description: '版本号，必须是整数'
+        required: false
+        default: '1'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build Android App APK (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - min_sdk: '23'
+            label: webview-android6plus
+          - min_sdk: '21'
+            label: webview-android5plus
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # 默认会装已下架的 'tools' 包，导致 sdkmanager 报 "Failed to find package 'tools'"
+          # 这里只装 platform-tools，去掉过时的 tools
+          packages: 'platform-tools'
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Prepare Android App icon from public/logo.png
+        run: |
+          cp public/logo.png apps/android-app/app/src/main/res/drawable/logo.png
+
+      - name: Decode Android signing keystore
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > /tmp/android-app-release.keystore
+            echo "build_type=release" >> "$GITHUB_OUTPUT"
+            echo "build_type_task=Release" >> "$GITHUB_OUTPUT"
+            echo "apk_suffix=release" >> "$GITHUB_OUTPUT"
+            echo "artifact_suffix=release-signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "Android signing secrets are not fully set, building debug APK only."
+            echo "build_type=debug" >> "$GITHUB_OUTPUT"
+            echo "build_type_task=Debug" >> "$GITHUB_OUTPUT"
+            echo "apk_suffix=debug" >> "$GITHUB_OUTPUT"
+            echo "artifact_suffix=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        working-directory: apps/android-app
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          APP_NAME: ${{ inputs.app_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          MIN_SDK: ${{ matrix.min_sdk }}
+          ANDROID_KEYSTORE_PATH: /tmp/android-app-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          gradle assemble${{ steps.signing.outputs.build_type_task }} \
+            -PBASE_URL="$BASE_URL" \
+            -PAPP_NAME="$APP_NAME" \
+            -PVERSION_NAME="$VERSION_NAME" \
+            -PVERSION_CODE="$VERSION_CODE" \
+            -PMIN_SDK="$MIN_SDK"
+
+      - name: Collect APK artifacts
+        run: |
+          mkdir -p /tmp/android-app-apks
+          cp \
+            "apps/android-app/app/build/outputs/apk/${{ steps.signing.outputs.build_type }}/app-${{ steps.signing.outputs.apk_suffix }}.apk" \
+            "/tmp/android-app-apks/moontvplus-app-${{ inputs.version_name }}-${{ matrix.label }}-${{ steps.signing.outputs.artifact_suffix }}.apk"
+          ls -lh /tmp/android-app-apks
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: moontvplus-android-app-${{ inputs.version_name }}-${{ matrix.label }}
+          path: /tmp/android-app-apks/*.apk
+          if-no-files-found: error
+          retention-days: 30
